@@ -36,7 +36,55 @@ static void __init test_stack(void)
 
 static void __init print_processes_backwards(void)
 {
-    // TODO
+    LIST_HEAD(tasks);
+
+    struct task_struct *proc;
+    stack_entry_t* task;
+    char* task_name;
+
+    for_each_process(proc){
+        task_name = kmalloc(TASK_COMM_LEN, GFP_KERNEL);
+        task = create_stack_entry(task_name);
+
+        if (!task || !task_name) {
+            goto nomem;
+        }
+
+        get_task_comm(task_name, proc);
+        stack_push(&tasks, task);
+    }
+
+    while (!stack_empty(&tasks)) {
+        task = stack_pop(&tasks);
+        task_name = STACK_ENTRY_DATA(task, char*);
+        printk(KERN_ALERT "%s \n", task_name);
+
+        delete_stack_entry(task);
+        kfree(task_name);
+    }
+
+    return;
+
+nomem:
+    printk(KERN_ALERT "PRINT_PROCESSES_BACKWARDS: no memory");
+
+    // cleanup
+    if (task) {
+        kfree(task);
+    }
+
+    if (task_name) {
+        kfree(task_name);
+    }
+
+    while (!stack_empty(&tasks)) {
+        task = stack_pop(&tasks);
+        task_name = STACK_ENTRY_DATA(task, void*);
+        delete_stack_entry(task);
+        kfree(task_name);
+    }
+
+    return;
 }
 
 static int __init ll_init(void)
