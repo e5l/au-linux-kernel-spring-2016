@@ -166,7 +166,7 @@ static int vsd_driver_probe(struct platform_device *pdev)
         goto error_get_buf;
     }
     vsd_dev->vbuf = phys_to_virt(vsd_phy_mem_buf_res->start);
-    vsd_dev->buf_size = vsd_phy_mem_buf_res->end - vsd_phy_mem_buf_res->start;
+    vsd_dev->buf_size = vsd_phy_mem_buf_res->end - vsd_phy_mem_buf_res->start + 1;
 
     pr_notice(LOG_TAG "VSD dev with MINOR %u"
         " has started successfully\n", vsd_dev->mdev.minor);
