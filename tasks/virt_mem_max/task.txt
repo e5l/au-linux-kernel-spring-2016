@@ -13,3 +13,4 @@ sysctl vm.overcommit_memory имеет значение 0 или 1.
 Вы должны получить примерно такую же цифру.
 
 Hint: malloc, mmap, getpagesize, /proc/task_id/maps, demand paging.
+
