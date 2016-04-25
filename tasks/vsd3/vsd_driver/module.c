@@ -67,7 +67,7 @@ static int vsd_dev_release(struct inode *inode, struct file *filp)
 static void vsd_dev_dma_op_complete_tsk_func(unsigned long unused)
 {
     (void)unused;
-    // TODO wakeup task waiting for completion of VSD cmd
+    wake_up(&vsd_dev->dma_op_compete_wq);
 }
 
 static ssize_t vsd_dev_read(struct file *filp,
@@ -76,6 +76,8 @@ static ssize_t vsd_dev_read(struct file *filp,
     ssize_t ret = 0;
     void *kdma_buf = NULL;
 
+    pr_notice(LOG_TAG "dev_read_lock\n");
+    mutex_lock(&vsd_dev->dev_ops_serialization_mutex);
     print_vsd_dev_hw_regs(vsd_dev);
 
     if (vsd_dev->hwregs->cmd != VSD_CMD_NONE) {
@@ -83,7 +85,11 @@ static ssize_t vsd_dev_read(struct file *filp,
         goto exit;
     }
 
-    // TODO check not to alloc too much DMA memory (easy DDOS)
+    if (read_size > 2 * PAGE_SIZE) {
+        ret = -EINVAL;
+        goto exit;
+    }
+
     kdma_buf = kzalloc(read_size, GFP_KERNEL);
     if (!kdma_buf) {
         ret = -ENOMEM;
@@ -99,15 +105,17 @@ static ssize_t vsd_dev_read(struct file *filp,
     wmb();
     vsd_dev->hwregs->cmd = VSD_CMD_READ;
 
-    /* 
+    /*
      * Suppose we've changed
      * wait_event call to wait_event_interruptible call.
      * Describe sequence of events (step by step) that lead to
      * write to freed kernel buffer in vsd_* kernel code.
-     * 1. TODO
-     * 2. TODO
-     * 3. TODO
-     * ...
+     * 0. user call write
+     * 1. call wait_event_interruptible
+     * 2. user send signal
+     * 3. unplug device
+     * 4. signal end
+     * 5. return to write
      */
     wait_event(vsd_dev->dma_op_compete_wq,
             vsd_dev->hwregs->cmd == VSD_CMD_NONE);
@@ -128,6 +136,8 @@ exit_free_dma:
     kfree(kdma_buf);
 exit:
     print_vsd_dev_hw_regs(vsd_dev);
+    pr_notice(LOG_TAG "dev_read unlock\n");
+    mutex_unlock(&vsd_dev->dev_ops_serialization_mutex);
 
     return ret;
 }
@@ -138,13 +148,20 @@ static ssize_t vsd_dev_write(struct file *filp,
     ssize_t ret = 0;
     void *kdma_buf = NULL;
 
+    pr_notice(LOG_TAG "dev_write lock\n");
+    mutex_lock(&vsd_dev->dev_ops_serialization_mutex);
+
     print_vsd_dev_hw_regs(vsd_dev);
     if (vsd_dev->hwregs->cmd != VSD_CMD_NONE) {
         ret = -EBUSY;
         goto exit;
     }
 
-    // TODO check not to alloc too much DMA memory (easy DDOS)
+    if (write_size > 2 * PAGE_SIZE) {
+        ret = -EINVAL;
+        goto exit;
+    }
+
     kdma_buf = kzalloc(write_size, GFP_KERNEL);
     if (!kdma_buf) {
         ret = -ENOMEM;
@@ -179,6 +196,8 @@ exit_free_dma:
     kfree(kdma_buf);
 exit:
     print_vsd_dev_hw_regs(vsd_dev);
+    pr_notice(LOG_TAG "dev_write unlock\n");
+    mutex_unlock(&vsd_dev->dev_ops_serialization_mutex);
 
     return ret;
 }
@@ -211,35 +230,69 @@ static loff_t vsd_dev_llseek(struct file *filp, loff_t off, int whence)
 static long vsd_ioctl_get_size(vsd_ioctl_get_size_arg_t __user *uarg)
 {
     vsd_ioctl_get_size_arg_t arg;
+
     if (copy_from_user(&arg, uarg, sizeof(arg)))
-        return -EFAULT;
+        goto exit_fault;
 
     arg.size = vsd_dev->hwregs->dev_size;
 
     if (copy_to_user(uarg, &arg, sizeof(arg)))
-        return -EFAULT;
+        goto exit_fault;
+
     return 0;
+
+exit_fault:
+    return -EFAULT;
 }
 
 static long vsd_ioctl_set_size(vsd_ioctl_set_size_arg_t __user *uarg)
 {
-    // TODO implement
-    return 0;
+    vsd_ioctl_set_size_arg_t arg;
+    long result;
+
+    if (copy_from_user(&arg, uarg, sizeof(arg)))
+        goto exit_fault;
+
+    vsd_dev->hwregs->result = 0;
+    vsd_dev->hwregs->tasklet_vaddr =
+        (uint64_t)&vsd_dev->dma_op_complete_tsk;
+    vsd_dev->hwregs->dev_offset = arg.size;
+    wmb();
+    vsd_dev->hwregs->cmd = VSD_CMD_SET_SIZE;
+
+    wait_event(vsd_dev->dma_op_compete_wq,
+                vsd_dev->hwregs->cmd == VSD_CMD_NONE);
+
+    result = vsd_dev->hwregs->result;
+
+    return result;
+
+exit_fault:
+    return -EFAULT;
 }
 
 static long vsd_dev_ioctl(struct file *filp, unsigned int cmd,
         unsigned long arg)
 {
+    long result;
+    pr_notice(LOG_TAG "dev_ioctl lock\n");
+    mutex_lock(&vsd_dev->dev_ops_serialization_mutex);
+
     switch(cmd) {
         case VSD_IOCTL_GET_SIZE:
-            return vsd_ioctl_get_size((vsd_ioctl_get_size_arg_t __user*)arg);
+            result = vsd_ioctl_get_size((vsd_ioctl_get_size_arg_t __user*)arg);
             break;
         case VSD_IOCTL_SET_SIZE:
-            return vsd_ioctl_set_size((vsd_ioctl_set_size_arg_t __user*)arg);
+            result =  vsd_ioctl_set_size((vsd_ioctl_set_size_arg_t __user*)arg);
             break;
         default:
-            return -ENOTTY;
+            result = -ENOTTY;
+            break;
     }
+
+    pr_notice(LOG_TAG "dev_ioctl unlock\n");
+    mutex_unlock(&vsd_dev->dev_ops_serialization_mutex);
+    return result;
 }
 
 static struct file_operations vsd_dev_fops = {
